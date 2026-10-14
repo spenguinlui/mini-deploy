@@ -47,7 +47,7 @@ class Round:
 
     def stop(self, p: Project, reason: str, alert: bool = False) -> None:
         """停下來；同一個原因只在第一次寫記錄（和通知）。"""
-        s = self.state[p.name]
+        s = self.state.setdefault(p.name, {})
         if s.get("blocked") == reason:
             return
         s["blocked"] = reason
@@ -57,12 +57,12 @@ class Round:
             self.alert(p.name, f"[mini-deploy] {p.name}：{reason}\n記錄檔：{self.log_path}")
 
     def handle(self, p: Project) -> None:
-        if p.name not in self.state:
+        s = self.state.get(p.name, {})
+        if "deployed" not in s:  # 還沒成功讀過這個專案（第一次處理，或之前一直出錯）
             self.state[p.name] = {"deployed": gitops.head(p.path), "failed": None}
             self.save()
             self.log(p.name, f"第一次處理，把目前的 {self.state[p.name]['deployed'][:7]} 當作已部署")
             return
-        s = self.state[p.name]
         try:
             sha = gitops.remote_head(p.path, p.branch)
         except gitops.GitError as e:
@@ -84,9 +84,9 @@ class Round:
         if not gitops.can_fast_forward(p.path, sha):
             return self.stop(p, f"{p.path} 有遠端沒有的 commit，不能快轉，不部署", alert=True)
 
+        gitops.fast_forward(p.path, sha)
         s.pop("blocked", None)
         self.log(p.name, f"開始部署 {sha[:7]}")
-        gitops.fast_forward(p.path, sha)
         error = run_update(p.path, self.log_path, self.timeout)
         if error is None:
             s.update(deployed=sha, failed=None)
@@ -114,6 +114,4 @@ def run_once(
         try:
             r.handle(p)
         except Exception as e:
-            r.log(p.name, "".join(traceback.format_exception_only(e)).strip())
-            if p.name in r.state:
-                r.stop(p, f"出錯：{e}", alert=True)
+            r.stop(p, f"出錯：{''.join(traceback.format_exception_only(e)).strip()}", alert=True)

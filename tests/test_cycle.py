@@ -29,6 +29,7 @@ class Fake:
 
     def notify(self, text):
         self.messages.append(text)
+        return True
 
 
 class Env:
@@ -96,6 +97,11 @@ def run(env_or_projects, fake, tmp_path, now=NOON, timeout=1800):
 
 def state(tmp_path):
     return json.loads((tmp_path / "state.json").read_text())
+
+
+def entries(tmp_path):
+    import re
+    return len(re.findall(r"^\d{4}-\d\d-\d\d ", log(tmp_path), re.M))
 
 
 def log(tmp_path):
@@ -304,3 +310,29 @@ def test_ci_status_gh_error_is_pending(monkeypatch):
     from deployer import ci
     monkeypatch.setenv("PATH", "/nonexistent")
     assert ci.ci_status("me/app", "abc") == "pending"
+
+
+def test_error_on_first_handling_logs_and_notifies_once_then_recovers(env, fake, tmp_path):
+    real = env.clone
+    hidden = tmp_path / "hidden"
+    real.rename(hidden)
+    for _ in range(3):
+        run(env, fake, tmp_path)
+    assert entries(tmp_path) == 1
+    assert len(fake.messages) == 1
+    hidden.rename(real)
+    run(env, fake, tmp_path)
+    assert state(tmp_path)["app"]["deployed"] == env.head()
+    assert env.deployed() == []
+
+
+def test_error_after_recorded_logs_and_notifies_once(env, fake, tmp_path):
+    run(env, fake, tmp_path)
+    before = entries(tmp_path)
+    sha = env.commit()
+    fake.ci[sha] = "success"
+    (env.clone / ".git" / "index.lock").write_text("")  # 快轉會一直失敗
+    for _ in range(3):
+        run(env, fake, tmp_path)
+    assert entries(tmp_path) - before == 1
+    assert len(fake.messages) == 1
