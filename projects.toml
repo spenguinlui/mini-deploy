@@ -1,12 +1,20 @@
-# 每個專案一段 [[projects]]。加專案就是改這裡再 push。
+# 每個專案一段 [[projects]]。
 # name：專案名（狀態檔、記錄檔、LINE 用）
 # path：mini 上那份 clone 的位置
 # branch：要部署的分支
 # repo：GitHub 的 owner/name（查 CI 用）
 # blackout：禁止部署的時段，mini 本地時間，可跨午夜，例如 ["23:00", "01:00"]；可省略
+# lock：快轉與執行 update.sh 時持有的目錄鎖；可省略
 
 [[projects]]
 name = "rent_house"
 path = "~/rent_house"
 branch = "main"
 repo = "spenguinlui/rent_house"
+
+[[projects]]
+name = "knowledge-garden"
+path = "~/knowledge-garden"
+branch = "v5"
+repo = "spenguinlui/knowledge-garden"
+lock = "/tmp/kb-inbox.lock"

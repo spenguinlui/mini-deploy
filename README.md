@@ -8,8 +8,10 @@ Mac mini 的自動部署。mini 每 60 秒跑一輪：看各專案在 GitHub 上
 - `update.sh` 失敗或超過 30 分鐘：記為失敗、傳一次 LINE，同一個 commit 不重跑，等新 commit。
 - clone 有未提交的改動或有遠端沒有的 commit：不動 clone，傳一次 LINE。
 - 第一次看到某個專案：把 clone 目前的 commit 當作已部署。
+- 專案設了 `lock`：快轉與執行 `update.sh` 前用該路徑建立目錄鎖；鎖被佔時每秒重試，最多等 10 分鐘，逾時記錄並傳一次 LINE。
 
-設定在 `projects.toml`（加專案就是改它再 push）。各檔案位置：
+設定在 `projects.toml`。加專案時改完並 push，PR 合進 `main` 後，在 mini 執行
+`git -C ~/mini-deploy pull` 套用設定。各檔案位置：
 
 | 東西 | 位置 |
 |---|---|

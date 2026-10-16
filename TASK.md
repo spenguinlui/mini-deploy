@@ -1,57 +1,44 @@
-# TASK: 第一版：rent_house 的 main 有新 commit、CI 通過，mini 就自動上線
+# TASK: 部署前先拿專案的鎖，並接上 knowledge-garden
 
 ## 要解決什麼問題
-mini 上的專案現在要嘛手動 ssh 部署，要嘛靠 GitHub self-hosted runner，而 runner 不能接 public repo。第一版只接 rent_house，從頭到尾跑通：mini 自己發現新版本、確認 CI 通過、上線，失敗時傳 LINE。
+knowledge-garden 要改由 mini-deploy 部署。它在 mini 上有一支每 60 秒跑一輪的排程（收錄筆記、建站），
+每一輪開始時建一個目錄 `/tmp/kb-inbox.lock` 當作鎖（目錄建得出來就算拿到，跑完刪掉；鎖在就不跑這一輪）。
+現在的 mini-deploy 不看這把鎖，可能在那一輪建站建到一半時換掉程式碼，結果是新舊混雜的網站，
+或那一輪當掉、發一則「收錄程式異常結束」的 LINE。原本的部署腳本會等這把鎖放掉才拉程式碼，改用 mini-deploy 不能少了這層保護。
 
 ## 做完怎麼確認（驗收條件）
-自動測試 `uv run pytest` 全綠。用暫存資料夾裡的真 git repo 當「GitHub 上的 repo」和「mini 上的 clone」；CI 查詢、LINE、時鐘用替身，不連網：
-- [ ] 遠端分支有新 commit、CI 通過、不在禁止時段 → clone 快轉到那個 commit，執行專案根目錄的 `deploy/update.sh`，記為已部署
-- [ ] 確認 CI 之後、切換之前，遠端又多了新 commit → 只切到確認過的那個
-- [ ] CI 還在跑、還沒有任何檢查結果、或查詢失敗（網路、`gh` 出錯）→ 不切換、不執行、不通知，下一輪再看
-- [ ] CI 沒過 → 不部署、不通知（GitHub 自己會寄信）
-- [ ] 落在該專案的禁止時段（支援跨午夜，例如 23:00–01:00；用 mini 的本地時間）→ 不部署；時段一過，下一輪就部署
-- [ ] `update.sh` 失敗或超過 30 分鐘 → 記為這個 commit 失敗、傳一次 LINE（內容有專案名、commit 前 7 碼、記錄檔路徑）；之後每一輪都不重跑同一個 commit、不重複通知；遠端出現新 commit 才再試
-- [ ] clone 有未提交的改動，或有遠端沒有的 commit（不能快轉）→ 不動 clone、不執行，傳一次 LINE
-- [ ] 第一次處理某個專案（還沒有任何紀錄）→ 把 clone 目前的 commit 當作已部署，不重新部署
-- [ ] 一個專案出錯，不影響同一輪其他專案（測試放兩個專案）
-- [ ] 沒設 LINE 權杖 → 只寫記錄檔，不出錯
-- [ ] 記錄檔只在有事發生時寫（開始部署、成功、失敗、某個原因第一次讓它停下），沒事的那幾輪不寫
-- [ ] `python3 -m deployer --test-notify` 傳一則測試 LINE
-- [ ] mini-deploy 自己的 CI（`.github/workflows/ci.yml`，GitHub 主機跑 pytest）綠
-
-（Claude 做）上線驗證：
-- [ ] mini-deploy 開成 public repo（打開「合併後自動刪分支」）；mini 上 clone 到 `~/mini-deploy`；LINE 權杖放 `~/.config/mini-deploy/env`（權限 600）；裝 LaunchAgent，每 60 秒跑一輪
-- [ ] `--test-notify` 在 mini 上跑一次，使用者收到 LINE
-- [ ] rent_house 的 TASK 合進 main、CI 綠之後 5 分鐘內：mini 的 `~/rent_house` 切到那個 commit，三個服務重啟（`launchctl list | grep rent-house` 的 PID 變了），記錄檔有成功那一行，`https://rent.wayne-liu.com` 正常
+`uv run pytest` 全綠。新測試沿用既有寫法（暫存資料夾裡的真 git repo，CI、LINE、時鐘用替身），鎖用暫存資料夾裡的目錄：
+- [ ] 專案設了 `lock`、鎖沒人拿 → 照常部署；`update.sh` 執行當下鎖目錄存在（腳本自己檢查並寫進檔案）；部署完鎖目錄不見
+- [ ] 鎖被別人拿著、等待途中被放掉 → 放掉之前 clone 的 commit 不變、`update.sh` 沒跑；放掉之後部署完成
+- [ ] 鎖一直被拿著，超過等待上限 → clone 的 commit 不變、`update.sh` 沒跑；記錄檔寫一次、LINE 傳一次，
+      下一輪還是等不到也不重複；別人的鎖目錄和裡面的檔案原封不動；鎖放掉後的下一輪照常部署
+- [ ] `update.sh` 失敗、超過時間被停掉 → 鎖一樣會放掉
+- [ ] 沒設 `lock` 的專案行為不變（既有測試全綠，不准改既有測試的預期）
+- [ ] 測試不真的等 10 分鐘：等待上限由 `run_once` 的參數帶入，測試給小的值
+- [ ] `uv run python -c "from pathlib import Path; from deployer.config import load_projects; print(load_projects(Path('projects.toml')))"`
+      印出 rent_house 與 knowledge-garden 兩個專案，knowledge-garden 的鎖是 `/tmp/kb-inbox.lock`
+- [ ] GitHub 上這個 PR 的 CI 綠
 
 ## 動到的模組
-- 部署器 `deployer/`
-- 外殼：`projects.toml`、`deploy/`（launchd 設定檔）、`pyproject.toml`、`.github/`、`README.md`
-- `ARCHITECTURE.md`：部署器「擁有的資料」改成狀態檔，外殼列出上面這些路徑
+- 部署器 `deployer/`、外殼（`projects.toml`、`README.md`）
 
 ## 範圍內
-- `deployer/`：檢查、判斷、切換、執行、記錄、LINE 通知；入口 `python3 -m deployer`（跑一輪就結束，由 launchd 每 60 秒叫一次）
-- `projects.toml`（只放 rent_house）、`deploy/com.liu.mini-deploy.plist`、`README.md`（做什麼、怎麼裝、看記錄、手動跑一輪、測試通知）
-- `.github/workflows/ci.yml`、`ARCHITECTURE.md`
+- `deployer/config.py`、`deployer/cycle.py`（需要的話新檔 `deployer/lock.py`）、`tests/`
+- `projects.toml`：開頭說明加 `lock`；新增 knowledge-garden（path `~/knowledge-garden`、branch `v5`、repo `spenguinlui/knowledge-garden`、lock `/tmp/kb-inbox.lock`）
+- `README.md`：說明 `lock`；「加專案就是改它再 push」改成實際做法（push 合進 main 後，在 mini 跑 `git -C ~/mini-deploy pull`）
 
 ## 範圍外（這次不准碰）
-- 其他專案（stock_commentary、knowledge-garden…）的接入與 runner 拆除
-- mini-deploy 自我更新
-- 寫回 GitHub（commit 狀態、留言）、webhook、任何對外 port
-- 暫停開關、重試指令、狀態網頁
-- rent_house repo 的任何檔案（另一個 TASK 在做）
+- `deploy/com.liu.mini-deploy.plist`、`.github/`、`deployer/ci.py`、`deployer/line.py`、`deployer/runner.py`
+- `update.sh` 30 分鐘上限、狀態檔 `state.json` 的欄位
+- 其他種類的鎖（例如 rent_house 排程用的 lockf 檔案鎖）；rent_house 那一段不加 `lock`
+- 不准 merge PR、不准 ssh 連 mini
 
 ## 已裁決的分歧點
-- 上線前要手動做事的版本 → 使用者裁決：不做暫停開關，各專案自己寫進部署腳本
-- 失敗通知 → 使用者裁決：LINE，跟 knowledge-garden 備份失敗用同一個機器人，只通知失敗
-- repo → 使用者裁決：現在就開 public
-- 只用 Python 標準函式庫，mini 上用 Homebrew 的 `python3` 直接跑、不建虛擬環境；pytest 只是開發依賴（Claude 決定：mini 上少一樣要維護的東西）
-- 每輪的做法（Claude 決定）：
-  - `git ls-remote` 看遠端分支（不走 API、沒有次數限制）；遠端 commit 跟紀錄不同才查 CI
-  - CI：`gh api repos/<owner>/<repo>/commits/<sha>/check-runs`，全部完成、結論都是 success／skipped／neutral 才算通過；一個都沒有算還沒跑
-  - 切換：`git fetch` 後 `git merge --ff-only <sha>`，切到確認過的那個 commit
-  - 部署指令固定是專案根目錄的 `deploy/update.sh`
-  - 一輪內各專案依序處理（launchd 不會同時起兩輪）
-- 狀態檔 `~/Library/Application Support/mini-deploy/state.json`，每個專案記最後部署成功與失敗的 commit（Claude 決定：`update.sh` 失敗時 clone 已經切過去了，只看 clone 分不出成功還是失敗）
-- 設定檔 `projects.toml` 放 repo 裡，每個專案寫名稱、mini 上的路徑、分支、GitHub repo（owner/name）、禁止時段（可省略）（Claude 決定：加專案就是改設定再 push，有歷史可查）
-- 記錄檔 `~/Library/Logs/mini-deploy.log`；LINE 權杖從 `~/.config/mini-deploy/env` 讀 `LINE_CHANNEL_ACCESS_TOKEN`、`LINE_USER_ID`，不進 repo
+- 鎖只在「快轉到新 commit＋執行 `update.sh`」這段拿著；查 CI、`git fetch` 不拿（fetch 不動工作目錄）（Claude 決定）
+- 鎖被佔就等：每秒試一次，最多 10 分鐘。不用「這輪先跳過、下一輪再試」：兩支排程都是每 60 秒一輪，
+  開始的時間點可能一直撞在一起，結果永遠部署不到（Claude 決定）
+- 等不到算一次停下，走既有的 `stop()`（同一個原因只記一次），要傳 LINE：等 10 分鐘還拿不到，
+  多半是鎖沒被清掉（例如程式被強制結束），那時收錄也一起停了，要有人去看（Claude 決定）
+- 等的時候同一輪後面的專案跟著等（一輪本來就依序處理），最多晚 10 分鐘，可以接受（Claude 決定）
+- 只刪自己建的鎖；鎖只支援「建目錄」這一種，因為 knowledge-garden 用的就是這種（Claude 決定）
+- mini-deploy 不部署自己，改完由 Claude 到 mini 手動 pull（Claude 決定）

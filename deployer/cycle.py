@@ -1,5 +1,7 @@
 import json
+import time
 import traceback
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -7,6 +9,32 @@ from typing import Callable
 from deployer import gitops
 from deployer.config import Project
 from deployer.runner import run_update
+
+
+class LockTimeout(Exception):
+    pass
+
+
+@contextmanager
+def deployment_lock(path: Path | None, timeout: float):
+    if path is None:
+        yield
+        return
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            path.mkdir()
+            break
+        except FileExistsError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise LockTimeout
+            time.sleep(min(1, remaining))
+    try:
+        yield
+    finally:
+        path.rmdir()
 
 
 def in_blackout(window: tuple[str, str] | None, now: datetime) -> bool:
@@ -18,13 +46,14 @@ def in_blackout(window: tuple[str, str] | None, now: datetime) -> bool:
 
 
 class Round:
-    def __init__(self, state_path, log_path, ci_status, notify, now, timeout):
+    def __init__(self, state_path, log_path, ci_status, notify, now, timeout, lock_timeout):
         self.state_path = Path(state_path)
         self.log_path = Path(log_path)
         self.ci_status = ci_status
         self.notify = notify
         self.now = now
         self.timeout = timeout
+        self.lock_timeout = lock_timeout
         self.state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
 
     def log(self, project: str, text: str) -> None:
@@ -84,10 +113,14 @@ class Round:
         if not gitops.can_fast_forward(p.path, sha):
             return self.stop(p, f"{p.path} 有遠端沒有的 commit，不能快轉，不部署", alert=True)
 
-        gitops.fast_forward(p.path, sha)
-        s.pop("blocked", None)
-        self.log(p.name, f"開始部署 {sha[:7]}")
-        error = run_update(p.path, self.log_path, self.timeout)
+        try:
+            with deployment_lock(p.lock, self.lock_timeout):
+                gitops.fast_forward(p.path, sha)
+                s.pop("blocked", None)
+                self.log(p.name, f"開始部署 {sha[:7]}")
+                error = run_update(p.path, self.log_path, self.timeout)
+        except LockTimeout:
+            return self.stop(p, f"等了 {self.lock_timeout:g} 秒仍拿不到鎖 {p.lock}，不部署", alert=True)
         if error is None:
             s.update(deployed=sha, failed=None)
             self.save()
@@ -108,8 +141,9 @@ def run_once(
     notify: Callable[[str], bool],
     now: Callable[[], datetime] = datetime.now,
     timeout: float = 30 * 60,
+    lock_timeout: float = 10 * 60,
 ) -> None:
-    r = Round(state_path, log_path, ci_status, notify, now, timeout)
+    r = Round(state_path, log_path, ci_status, notify, now, timeout, lock_timeout)
     for p in projects:
         try:
             r.handle(p)
