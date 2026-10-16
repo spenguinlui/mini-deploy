@@ -10,6 +10,7 @@ class Project:
     branch: str
     repo: str  # GitHub 的 owner/name
     blackout: tuple[str, str] | None = None  # ("23:00", "01:00")，mini 本地時間，可跨午夜
+    lock: Path | None = None  # 部署時用 mkdir 取得的目錄鎖；可省略
 
 
 def load_projects(path: Path) -> list[Project]:
@@ -21,6 +22,7 @@ def load_projects(path: Path) -> list[Project]:
             branch=p["branch"],
             repo=p["repo"],
             blackout=tuple(p["blackout"]) if "blackout" in p else None,
+            lock=Path(p["lock"]).expanduser() if "lock" in p else None,
         )
         for p in data["projects"]
     ]

@@ -1,11 +1,13 @@
 import json
+import shlex
 import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from deployer import Project, main, run_once
+from deployer import Project, load_projects, main, run_once
 
 NOON = datetime(2026, 10, 14, 12, 0)
 
@@ -68,8 +70,15 @@ class Env:
     def deployed(self):
         return self.marker.read_text().split() if self.marker.exists() else []
 
-    def project(self, blackout=None):
-        return Project(name=self.name, path=self.clone, branch="main", repo=f"me/{self.name}", blackout=blackout)
+    def project(self, blackout=None, lock=None):
+        return Project(
+            name=self.name,
+            path=self.clone,
+            branch="main",
+            repo=f"me/{self.name}",
+            blackout=blackout,
+            lock=lock,
+        )
 
 
 @pytest.fixture
@@ -82,7 +91,7 @@ def fake():
     return Fake()
 
 
-def run(env_or_projects, fake, tmp_path, now=NOON, timeout=1800):
+def run(env_or_projects, fake, tmp_path, now=NOON, timeout=1800, lock_timeout=600):
     projects = env_or_projects if isinstance(env_or_projects, list) else [env_or_projects.project()]
     run_once(
         projects,
@@ -92,6 +101,7 @@ def run(env_or_projects, fake, tmp_path, now=NOON, timeout=1800):
         notify=fake.notify,
         now=lambda: now,
         timeout=timeout,
+        lock_timeout=lock_timeout,
     )
 
 
@@ -107,6 +117,13 @@ def entries(tmp_path):
 def log(tmp_path):
     p = tmp_path / "deploy.log"
     return p.read_text() if p.exists() else ""
+
+
+def test_projects_config_includes_knowledge_garden_lock():
+    projects = load_projects(Path(__file__).parent.parent / "projects.toml")
+    assert [project.name for project in projects] == ["rent_house", "knowledge-garden"]
+    assert projects[0].lock is None
+    assert projects[1].lock == Path("/tmp/kb-inbox.lock")
 
 
 def test_first_run_records_current_commit_without_deploying(env, fake, tmp_path):
@@ -127,6 +144,101 @@ def test_new_commit_ci_passed_deploys(env, fake, tmp_path):
     assert fake.ci_calls == [("me/app", sha)]
     assert "成功" in log(tmp_path)
     assert fake.messages == []
+
+
+def test_lock_is_held_while_updating_and_released_afterwards(env, fake, tmp_path):
+    lock = tmp_path / "app.lock"
+    project = env.project(lock=lock)
+    run([project], fake, tmp_path)
+    script = (
+        f'test -d {shlex.quote(str(lock))}\n'
+        f'git rev-parse HEAD >> {shlex.quote(str(env.marker))}\n'
+    )
+    sha = env.commit(script)
+    fake.ci[sha] = "success"
+
+    run([project], fake, tmp_path)
+
+    assert env.head() == sha
+    assert env.deployed() == [sha]
+    assert not lock.exists()
+
+
+def test_waits_for_an_existing_lock_before_fast_forwarding(env, fake, tmp_path):
+    lock = tmp_path / "app.lock"
+    project = env.project(lock=lock)
+    run([project], fake, tmp_path)
+    old = env.head()
+    sha = env.commit()
+    fake.ci[sha] = "success"
+    lock.mkdir()
+
+    thread = threading.Thread(
+        target=run,
+        args=([project], fake, tmp_path),
+        kwargs={"lock_timeout": 0.3},
+    )
+    thread.start()
+    threading.Event().wait(0.05)
+    assert thread.is_alive()
+    assert env.head() == old
+    assert env.deployed() == []
+
+    lock.rmdir()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert env.head() == sha
+    assert env.deployed() == [sha]
+    assert not lock.exists()
+
+
+def test_lock_timeout_stops_once_without_touching_someone_elses_lock(env, fake, tmp_path):
+    lock = tmp_path / "app.lock"
+    owner_file = lock / "owner"
+    project = env.project(lock=lock)
+    run([project], fake, tmp_path)
+    old = env.head()
+    before = entries(tmp_path)
+    sha = env.commit()
+    fake.ci[sha] = "success"
+    lock.mkdir()
+    owner_file.write_text("keep me")
+
+    run([project], fake, tmp_path, lock_timeout=0.01)
+    run([project], fake, tmp_path, lock_timeout=0.01)
+
+    assert env.head() == old
+    assert env.deployed() == []
+    assert entries(tmp_path) - before == 1
+    assert len(fake.messages) == 1
+    assert "鎖" in fake.messages[0]
+    assert owner_file.read_text() == "keep me"
+
+    owner_file.unlink()
+    lock.rmdir()
+    run([project], fake, tmp_path, lock_timeout=0.01)
+    assert env.head() == sha
+    assert env.deployed() == [sha]
+    assert not lock.exists()
+
+
+@pytest.mark.parametrize("script,timeout", [
+    ('test -d "$LOCK" && echo locked > "$MARKER"; exit 3\n', 1),
+    ('test -d "$LOCK" && echo locked > "$MARKER"; sleep 5\n', 0.5),
+])
+def test_update_failure_or_timeout_releases_lock(env, fake, tmp_path, script, timeout):
+    lock = tmp_path / "app.lock"
+    project = env.project(lock=lock)
+    run([project], fake, tmp_path)
+    script = script.replace("$LOCK", str(lock)).replace("$MARKER", str(env.marker))
+    sha = env.commit(script)
+    fake.ci[sha] = "success"
+
+    run([project], fake, tmp_path, timeout=timeout)
+
+    assert env.marker.read_text().strip() == "locked"
+    assert state(tmp_path)["app"]["failed"] == sha
+    assert not lock.exists()
 
 
 def test_unchanged_remote_skips_ci_and_writes_no_log(env, fake, tmp_path):
