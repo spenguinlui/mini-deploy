@@ -561,3 +561,82 @@ def test_next_round_marks_leftover_running_deployment_interrupted(env, fake, tmp
     assert record["result"] == "中斷"
     assert record["ended_at"]
     assert record["error"] == "mini-deploy 在部署完成前結束"
+
+
+def blocked_fields(tmp_path):
+    s = state(tmp_path)["app"]
+    return s.get("blocked_kind"), s.get("blocked_sha"), s.get("blocked_since")
+
+
+def test_waiting_for_ci_records_kind_commit_and_since_until_deployed(env, fake, tmp_path):
+    from datetime import timedelta
+    run(env, fake, tmp_path)
+    sha = env.commit()
+
+    run(env, fake, tmp_path)
+    assert blocked_fields(tmp_path) == ("ci_pending", sha, NOON.isoformat())
+    run(env, fake, tmp_path, now=NOON + timedelta(minutes=5))
+    assert blocked_fields(tmp_path) == ("ci_pending", sha, NOON.isoformat())
+
+    fake.ci[sha] = "failure"
+    later = NOON + timedelta(minutes=8)
+    run(env, fake, tmp_path, now=later)
+    assert blocked_fields(tmp_path) == ("ci_failed", sha, later.isoformat())
+
+    fake.ci[sha] = "success"
+    run(env, fake, tmp_path)
+    assert blocked_fields(tmp_path) == (None, None, None)
+    assert "blocked" not in state(tmp_path)["app"]
+
+
+def test_blackout_kind(env, fake, tmp_path):
+    project = env.project(blackout=("11:00", "13:00"))
+    run([project], fake, tmp_path)
+    sha = env.commit()
+    run([project], fake, tmp_path)
+    assert blocked_fields(tmp_path) == ("blackout", sha, NOON.isoformat())
+
+
+def test_dirty_clone_is_attention(env, fake, tmp_path):
+    run(env, fake, tmp_path)
+    sha = env.commit()
+    fake.ci[sha] = "success"
+    (env.clone / "n.txt").write_text("local edit")
+    run(env, fake, tmp_path)
+    assert blocked_fields(tmp_path) == ("attention", sha, NOON.isoformat())
+
+
+def test_missing_remote_branch_is_remote_error(env, fake, tmp_path):
+    run(env, fake, tmp_path)
+    git(env.clone, "remote", "set-url", "origin", str(tmp_path / "missing.git"))
+    run(env, fake, tmp_path)
+    kind, sha, since = blocked_fields(tmp_path)
+    assert (kind, sha, since) == ("remote_error", None, NOON.isoformat())
+
+
+def test_error_is_attention(env, fake, tmp_path):
+    run(env, fake, tmp_path)
+    sha = env.commit()
+
+    def boom():
+        raise RuntimeError("boom")
+
+    fake.on_ci = boom
+    run(env, fake, tmp_path)
+    assert blocked_fields(tmp_path)[0] == "attention"
+
+
+def test_deployed_title_recorded_first_time_after_deploy_and_backfilled(env, fake, tmp_path):
+    run(env, fake, tmp_path)
+    assert state(tmp_path)["app"]["deployed_title"] == "c"
+
+    sha = env.commit(msg="ship feature")
+    fake.ci[sha] = "success"
+    run(env, fake, tmp_path)
+    assert state(tmp_path)["app"]["deployed_title"] == "ship feature"
+
+    old = state(tmp_path)
+    del old["app"]["deployed_title"]
+    (tmp_path / "state.json").write_text(json.dumps(old))
+    run(env, fake, tmp_path)
+    assert state(tmp_path)["app"]["deployed_title"] == "ship feature"

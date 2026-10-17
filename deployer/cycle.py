@@ -52,6 +52,14 @@ def in_blackout(window: tuple[str, str] | None, now: datetime) -> bool:
     return start <= t < end if start <= end else t >= start or t < end
 
 
+def clear_blocked(s: dict) -> bool:
+    """清掉停住的原因；原本有停住才回 True。"""
+    had = s.pop("blocked", None) is not None
+    for key in ("blocked_kind", "blocked_sha", "blocked_since"):
+        s.pop(key, None)
+    return had
+
+
 class Round:
     def __init__(self, state_path, log_path, history_path, ci_status, notify, now, timeout, lock_timeout):
         self.state_path = Path(state_path)
@@ -83,12 +91,15 @@ class Round:
         except Exception as e:
             self.log(project, f"LINE 通知失敗：{e}")
 
-    def stop(self, p: Project, reason: str, alert: bool = False) -> None:
-        """停下來；同一個原因只在第一次寫記錄（和通知）。"""
+    def stop(self, p: Project, reason: str, kind: str, sha: str | None = None, alert: bool = False) -> None:
+        """停下來；同一個原因只在第一次寫記錄（和通知）。
+
+        kind 是給網頁判斷燈號用的種類：ci_pending、ci_failed、blackout、attention（需要人處理）、remote_error。
+        """
         s = self.state.setdefault(p.name, {})
         if s.get("blocked") == reason:
             return
-        s["blocked"] = reason
+        s.update(blocked=reason, blocked_kind=kind, blocked_sha=sha, blocked_since=self.now().isoformat())
         self.save()
         self.log(p.name, reason)
         if alert:
@@ -97,53 +108,52 @@ class Round:
     def handle(self, p: Project) -> None:
         s = self.state.get(p.name, {})
         if "deployed" not in s:  # 還沒成功讀過這個專案（第一次處理，或之前一直出錯）
-            self.state[p.name] = {"deployed": gitops.head(p.path), "failed": None}
+            head = gitops.head(p.path)
+            self.state[p.name] = {"deployed": head, "failed": None, "deployed_title": gitops.commit_title(p.path, head)}
             self.save()
             self.log(p.name, f"第一次處理，把目前的 {self.state[p.name]['deployed'][:7]} 當作已部署")
             return
+        if "deployed_title" not in s:  # 加這個欄位之前寫的狀態檔
+            s["deployed_title"] = gitops.commit_title(p.path, s["deployed"])
+            self.save()
         try:
             sha = gitops.remote_head(p.path, p.branch)
         except gitops.GitError as e:
-            return self.stop(p, f"查不到遠端分支：{e}")
+            return self.stop(p, f"查不到遠端分支：{e}", "remote_error")
         if sha in (s.get("deployed"), s.get("failed")):
-            if s.pop("blocked", None) is not None:
+            if clear_blocked(s):
                 self.save()
             return
         if in_blackout(p.blackout, self.now()):
-            return self.stop(p, f"{sha[:7]} 落在禁止時段 {p.blackout[0]}–{p.blackout[1]}，時段過後再部署")
+            return self.stop(p, f"{sha[:7]} 落在禁止時段 {p.blackout[0]}–{p.blackout[1]}，時段過後再部署", "blackout", sha)
         ci = self.ci_status(p.repo, sha)
         if ci == "pending":
-            return self.stop(p, f"{sha[:7]} 的 CI 還沒有結果，下一輪再看")
+            return self.stop(p, f"{sha[:7]} 的 CI 還沒有結果，下一輪再看", "ci_pending", sha)
         if ci != "success":
-            return self.stop(p, f"{sha[:7]} 的 CI 沒過，不部署")
+            return self.stop(p, f"{sha[:7]} 的 CI 沒過，不部署", "ci_failed", sha)
         if gitops.is_dirty(p.path):
-            return self.stop(p, f"{p.path} 有未提交的改動，不部署", alert=True)
+            return self.stop(p, f"{p.path} 有未提交的改動，不部署", "attention", sha, alert=True)
         gitops.fetch(p.path, p.branch)
         if not gitops.can_fast_forward(p.path, sha):
-            return self.stop(p, f"{p.path} 有遠端沒有的 commit，不能快轉，不部署", alert=True)
+            return self.stop(p, f"{p.path} 有遠端沒有的 commit，不能快轉，不部署", "attention", sha, alert=True)
 
         try:
             with deployment_lock(p.lock, self.lock_timeout):
                 gitops.fast_forward(p.path, sha)
-                s.pop("blocked", None)
+                clear_blocked(s)
                 self.log(p.name, f"開始部署 {sha[:7]}")
-                deployment_id = start_deployment(
-                    self.history_path,
-                    p.name,
-                    sha,
-                    gitops.commit_title(p.path, sha),
-                    self.now(),
-                )
+                title = gitops.commit_title(p.path, sha)
+                deployment_id = start_deployment(self.history_path, p.name, sha, title, self.now())
                 error = run_update(
                     p.path,
                     deployment_log_path(self.history_path, deployment_id),
                     self.timeout,
                 )
         except LockTimeout:
-            return self.stop(p, f"等了 {self.lock_timeout:g} 秒仍拿不到鎖 {p.lock}，不部署", alert=True)
+            return self.stop(p, f"等了 {self.lock_timeout:g} 秒仍拿不到鎖 {p.lock}，不部署", "attention", sha, alert=True)
         if error is None:
             finish_deployment(self.history_path, deployment_id, "成功", self.now())
-            s.update(deployed=sha, failed=None)
+            s.update(deployed=sha, deployed_title=title, failed=None)
             self.save()
             self.log(p.name, f"部署成功 {sha[:7]}")
         else:
@@ -176,4 +186,4 @@ def run_once(
         try:
             r.handle(p)
         except Exception as e:
-            r.stop(p, f"出錯：{''.join(traceback.format_exception_only(e)).strip()}", alert=True)
+            r.stop(p, f"出錯：{''.join(traceback.format_exception_only(e)).strip()}", "attention", alert=True)
