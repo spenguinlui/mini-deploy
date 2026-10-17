@@ -18,3 +18,10 @@ path = "~/knowledge-garden"
 branch = "v5"
 repo = "spenguinlui/knowledge-garden"
 lock = "/tmp/kb-inbox.lock"
+
+[[projects]]
+name = "stock_commentary"
+path = "~/sideproject/stock_commentary"
+branch = "main"
+repo = "spenguinlui/stock_commentary"
+blackout = ["20:30", "23:30"]  # 晚上抓資料與投顧分析排程的時段
