@@ -456,8 +456,23 @@ def test_error_after_recorded_logs_and_notifies_once(env, fake, tmp_path):
 
 
 def deployment_records(tmp_path):
-    from history import list_deployments
-    return list_deployments(tmp_path / "deploys")
+    from history import get_deployment, list_deployments
+    root = tmp_path / "deploys"
+    return [get_deployment(root, record["id"]) for record in list_deployments(root)]
+
+
+def test_deployment_list_leaves_out_log_and_single_record_reads_it(env, fake, tmp_path):
+    from history import get_deployment, list_deployments
+    run(env, fake, tmp_path)
+    sha = env.commit('echo "output"\n')
+    fake.ci[sha] = "success"
+
+    run(env, fake, tmp_path)
+
+    listed = list_deployments(tmp_path / "deploys")
+    assert len(listed) == 1
+    assert "log" not in listed[0]
+    assert get_deployment(tmp_path / "deploys", listed[0]["id"])["log"] == "output\n"
 
 
 def test_successful_deployment_has_own_complete_record_and_log(env, fake, tmp_path):

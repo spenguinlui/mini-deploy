@@ -45,6 +45,11 @@ def start_deployment(
     return deployment_id
 
 
+def _read_record(root: Path, deployment_id: int) -> dict | None:
+    path = _record_path(Path(root), deployment_id)
+    return json.loads(path.read_text()) if path.is_file() else None
+
+
 def finish_deployment(
     root: Path,
     deployment_id: int,
@@ -52,26 +57,26 @@ def finish_deployment(
     ended_at: datetime,
     error: str | None = None,
 ) -> None:
-    record = get_deployment(root, deployment_id)
+    record = _read_record(root, deployment_id)
     if record is None:
         raise FileNotFoundError(f"找不到部署紀錄 {deployment_id}")
     record.update(result=result, ended_at=ended_at.isoformat(), error=error)
-    record.pop("log", None)
     _write(Path(root), record)
 
 
 def get_deployment(root: Path, deployment_id: int) -> dict | None:
+    """單筆紀錄，連同完整記錄檔。"""
     root = Path(root)
-    path = _record_path(root, deployment_id)
-    if not path.is_file():
+    record = _read_record(root, deployment_id)
+    if record is None:
         return None
-    record = json.loads(path.read_text())
     log_path = deployment_log_path(root, deployment_id)
     record["log"] = log_path.read_text(errors="replace") if log_path.is_file() else ""
     return record
 
 
 def list_deployments(root: Path, project: str | None = None) -> list[dict]:
+    """所有紀錄，新的在前；只讀 .json，不帶記錄檔內容。"""
     root = Path(root)
     if not root.is_dir():
         return []
@@ -79,7 +84,7 @@ def list_deployments(root: Path, project: str | None = None) -> list[dict]:
     for path in root.glob("*.json"):
         if not path.stem.isdigit():
             continue
-        record = get_deployment(root, int(path.stem))
+        record = _read_record(root, int(path.stem))
         if record is not None and (project is None or record["project"] == project):
             records.append(record)
     return sorted(records, key=lambda record: record["id"], reverse=True)

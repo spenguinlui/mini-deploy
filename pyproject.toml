@@ -24,3 +24,10 @@ root_packages = ["deployer", "history", "web"]
 name = "Module dependency direction"
 type = "layers"
 layers = ["web", "deployer", "history"]
+
+[[tool.importlinter.contracts]]
+name = "Web uses only the deployer entry point"
+type = "forbidden"
+source_modules = ["web"]
+forbidden_modules = ["deployer.*"]
+allow_indirect_imports = true
