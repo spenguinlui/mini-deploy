@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from history import deployment_log_path, finish_deployment, interrupt_running, start_deployment
+
 from deployer import gitops
 from deployer.config import Project
 from deployer.runner import run_update
@@ -13,6 +15,11 @@ from deployer.runner import run_update
 
 class LockTimeout(Exception):
     pass
+
+
+def read_state(path: Path) -> dict:
+    path = Path(path)
+    return json.loads(path.read_text()) if path.exists() else {}
 
 
 @contextmanager
@@ -46,15 +53,17 @@ def in_blackout(window: tuple[str, str] | None, now: datetime) -> bool:
 
 
 class Round:
-    def __init__(self, state_path, log_path, ci_status, notify, now, timeout, lock_timeout):
+    def __init__(self, state_path, log_path, history_path, ci_status, notify, now, timeout, lock_timeout):
         self.state_path = Path(state_path)
         self.log_path = Path(log_path)
+        self.history_path = Path(history_path)
         self.ci_status = ci_status
         self.notify = notify
         self.now = now
         self.timeout = timeout
         self.lock_timeout = lock_timeout
-        self.state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
+        self.state = read_state(self.state_path)
+        interrupt_running(self.history_path, self.now())
 
     def log(self, project: str, text: str) -> None:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,18 +127,36 @@ class Round:
                 gitops.fast_forward(p.path, sha)
                 s.pop("blocked", None)
                 self.log(p.name, f"開始部署 {sha[:7]}")
-                error = run_update(p.path, self.log_path, self.timeout)
+                deployment_id = start_deployment(
+                    self.history_path,
+                    p.name,
+                    sha,
+                    gitops.commit_title(p.path, sha),
+                    self.now(),
+                )
+                error = run_update(
+                    p.path,
+                    deployment_log_path(self.history_path, deployment_id),
+                    self.timeout,
+                )
         except LockTimeout:
             return self.stop(p, f"等了 {self.lock_timeout:g} 秒仍拿不到鎖 {p.lock}，不部署", alert=True)
         if error is None:
+            finish_deployment(self.history_path, deployment_id, "成功", self.now())
             s.update(deployed=sha, failed=None)
             self.save()
             self.log(p.name, f"部署成功 {sha[:7]}")
         else:
+            result = "逾時" if error.startswith("超過 ") else "失敗"
+            finish_deployment(self.history_path, deployment_id, result, self.now(), error)
             s["failed"] = sha
             self.save()
             self.log(p.name, f"部署失敗 {sha[:7]}：{error}")
-            self.alert(p.name, f"[mini-deploy] {p.name} 部署失敗\ncommit {sha[:7]}：{error}\n記錄檔：{self.log_path}")
+            self.alert(
+                p.name,
+                f"[mini-deploy] {p.name} 部署失敗\ncommit {sha[:7]}：{error}\n"
+                f"https://liumac-mini.tail93fb54.ts.net:41200/deploys/{deployment_id}",
+            )
 
 
 def run_once(
@@ -137,13 +164,14 @@ def run_once(
     *,
     state_path: Path,
     log_path: Path,
+    history_path: Path,
     ci_status: Callable[[str, str], str],
     notify: Callable[[str], bool],
     now: Callable[[], datetime] = datetime.now,
     timeout: float = 30 * 60,
     lock_timeout: float = 10 * 60,
 ) -> None:
-    r = Round(state_path, log_path, ci_status, notify, now, timeout, lock_timeout)
+    r = Round(state_path, log_path, history_path, ci_status, notify, now, timeout, lock_timeout)
     for p in projects:
         try:
             r.handle(p)

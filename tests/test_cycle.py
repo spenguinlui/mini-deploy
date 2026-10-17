@@ -2,6 +2,7 @@ import json
 import shlex
 import subprocess
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -97,6 +98,7 @@ def run(env_or_projects, fake, tmp_path, now=NOON, timeout=1800, lock_timeout=60
         projects,
         state_path=tmp_path / "state.json",
         log_path=tmp_path / "deploy.log",
+        history_path=tmp_path / "deploys",
         ci_status=fake.ci_status,
         notify=fake.notify,
         now=lambda: now,
@@ -222,11 +224,13 @@ def test_lock_timeout_stops_once_without_touching_someone_elses_lock(env, fake, 
     assert not lock.exists()
 
 
-@pytest.mark.parametrize("script,timeout", [
-    ('test -d "$LOCK" && echo locked > "$MARKER"; exit 3\n', 1),
-    ('test -d "$LOCK" && echo locked > "$MARKER"; sleep 5\n', 0.5),
+# 失敗那組用預設的 30 分鐘上限：腳本自己結束，結果不受筆電快慢影響；
+# 逾時那組的腳本永遠不寫標記檔，什麼時候被中止都一樣
+@pytest.mark.parametrize("script,timeout,expects_marker", [
+    ('test -d "$LOCK" && echo locked > "$MARKER"; exit 3\n', 1800, True),
+    ('sleep 30\n', 0.1, False),
 ])
-def test_update_failure_or_timeout_releases_lock(env, fake, tmp_path, script, timeout):
+def test_update_failure_or_timeout_releases_lock(env, fake, tmp_path, script, timeout, expects_marker):
     lock = tmp_path / "app.lock"
     project = env.project(lock=lock)
     run([project], fake, tmp_path)
@@ -236,7 +240,7 @@ def test_update_failure_or_timeout_releases_lock(env, fake, tmp_path, script, ti
 
     run([project], fake, tmp_path, timeout=timeout)
 
-    assert env.marker.read_text().strip() == "locked"
+    assert env.marker.exists() is expects_marker
     assert state(tmp_path)["app"]["failed"] == sha
     assert not lock.exists()
 
@@ -316,7 +320,8 @@ def test_update_failure_or_timeout_notifies_once_and_retries_only_new_commit(env
     assert state(tmp_path)["app"]["failed"] == bad
     assert len(fake.messages) == 1
     msg = fake.messages[0]
-    assert "app" in msg and bad[:7] in msg and str(tmp_path / "deploy.log") in msg
+    assert "app" in msg and bad[:7] in msg
+    assert "https://liumac-mini.tail93fb54.ts.net:41200/deploys/1" in msg
     run(env, fake, tmp_path, timeout=1)
     run(env, fake, tmp_path, timeout=1)
     assert len(fake.messages) == 1
@@ -448,3 +453,111 @@ def test_error_after_recorded_logs_and_notifies_once(env, fake, tmp_path):
         run(env, fake, tmp_path)
     assert entries(tmp_path) - before == 1
     assert len(fake.messages) == 1
+
+
+def deployment_records(tmp_path):
+    from history import get_deployment, list_deployments
+    root = tmp_path / "deploys"
+    return [get_deployment(root, record["id"]) for record in list_deployments(root)]
+
+
+def test_deployment_list_leaves_out_log_and_single_record_reads_it(env, fake, tmp_path):
+    from history import get_deployment, list_deployments
+    run(env, fake, tmp_path)
+    sha = env.commit('echo "output"\n')
+    fake.ci[sha] = "success"
+
+    run(env, fake, tmp_path)
+
+    listed = list_deployments(tmp_path / "deploys")
+    assert len(listed) == 1
+    assert "log" not in listed[0]
+    assert get_deployment(tmp_path / "deploys", listed[0]["id"])["log"] == "output\n"
+
+
+def test_successful_deployment_has_own_complete_record_and_log(env, fake, tmp_path):
+    run(env, fake, tmp_path)
+    sha = env.commit('echo "first line"\necho "last line"\n', msg="ship feature")
+    fake.ci[sha] = "success"
+
+    run(env, fake, tmp_path)
+
+    records = deployment_records(tmp_path)
+    assert len(records) == 1
+    record = records[0]
+    assert record["project"] == "app"
+    assert record["commit"] == sha
+    assert record["title"] == "ship feature"
+    assert record["started_at"]
+    assert record["ended_at"]
+    assert record["result"] == "成功"
+    assert record["error"] is None
+    assert record["log"] == "first line\nlast line\n"
+    assert "first line" not in log(tmp_path)
+    assert "last line" not in log(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "script,timeout,result,error_text,output",
+    [
+        ('echo "before failure"; exit 7\n', 1, "失敗", "結束代碼 7", "before failure\n"),
+        ('echo "before timeout"; sleep 5\n', 2, "逾時", "超過", "before timeout\n"),
+    ],
+)
+def test_failed_and_timed_out_deployments_keep_output(
+    env, fake, tmp_path, script, timeout, result, error_text, output
+):
+    run(env, fake, tmp_path)
+    sha = env.commit(script)
+    fake.ci[sha] = "success"
+
+    run(env, fake, tmp_path, timeout=timeout)
+
+    record = deployment_records(tmp_path)[0]
+    assert record["result"] == result
+    assert error_text in record["error"]
+    assert record["log"] == output
+
+
+def test_running_deployment_is_visible_with_current_output(env, fake, tmp_path):
+    run(env, fake, tmp_path)
+    ready = tmp_path / "ready"
+    release = tmp_path / "release"
+    sha = env.commit(
+        f'echo "working"\ntouch {shlex.quote(str(ready))}\n'
+        f'while test ! -e {shlex.quote(str(release))}; do sleep 0.05; done\n'
+    )
+    fake.ci[sha] = "success"
+    thread = threading.Thread(target=run, args=(env, fake, tmp_path), kwargs={"timeout": 10})
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not ready.exists() and time.monotonic() < deadline:
+        threading.Event().wait(0.01)
+
+    record = deployment_records(tmp_path)[0]
+    assert record["result"] == "部署中"
+    assert record["ended_at"] is None
+    assert record["log"] == "working\n"
+
+    release.touch()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_next_round_marks_leftover_running_deployment_interrupted(env, fake, tmp_path):
+    from history import start_deployment
+
+    start_deployment(
+        tmp_path / "deploys",
+        project="app",
+        commit="a" * 40,
+        title="unfinished",
+        started_at=NOON,
+    )
+
+    run(env, fake, tmp_path)
+
+    record = deployment_records(tmp_path)[0]
+    assert record["result"] == "中斷"
+    assert record["ended_at"]
+    assert record["error"] == "mini-deploy 在部署完成前結束"

@@ -5,7 +5,10 @@ requires-python = ">=3.11"
 dependencies = []
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "import-linter>=2.15",
+    "pytest>=8",
+]
 
 [tool.uv]
 package = false
@@ -13,3 +16,18 @@ package = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.importlinter]
+root_packages = ["deployer", "history", "web"]
+
+[[tool.importlinter.contracts]]
+name = "Module dependency direction"
+type = "layers"
+layers = ["web", "deployer", "history"]
+
+[[tool.importlinter.contracts]]
+name = "Web uses only the deployer entry point"
+type = "forbidden"
+source_modules = ["web"]
+forbidden_modules = ["deployer.*"]
+allow_indirect_imports = true

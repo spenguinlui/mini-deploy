@@ -27,6 +27,10 @@ def head(path: Path) -> str:
     return _git(path, "rev-parse", "HEAD")
 
 
+def commit_title(path: Path, sha: str) -> str:
+    return _git(path, "show", "-s", "--format=%s", sha)
+
+
 def is_dirty(path: Path) -> bool:
     # 沒被追蹤的檔案（執行時產生的檔案）不算，快轉不會動到它們
     return bool(_git(path, "status", "--porcelain", "--untracked-files=no"))
