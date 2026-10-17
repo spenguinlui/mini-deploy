@@ -32,3 +32,9 @@ path = "~/self-profile"
 branch = "main"
 repo = "spenguinlui/self-profile"
 lock = "/tmp/self-profile-git.lock"  # mini 自己 commit、push 時也拿這把
+
+[[projects]]
+name = "pikmin"
+path = "~/pikmin"
+branch = "main"
+repo = "spenguinlui/pikmin"
