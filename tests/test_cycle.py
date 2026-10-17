@@ -121,7 +121,7 @@ def log(tmp_path):
 
 def test_projects_config_includes_knowledge_garden_lock():
     projects = load_projects(Path(__file__).parent.parent / "projects.toml")
-    assert [project.name for project in projects] == ["rent_house", "knowledge-garden", "stock_commentary", "self-profile"]
+    assert [project.name for project in projects] == ["rent_house", "knowledge-garden", "stock_commentary", "self-profile", "pikmin"]
     assert projects[0].lock is None
     assert projects[1].lock == Path("/tmp/kb-inbox.lock")
 
