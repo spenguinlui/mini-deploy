@@ -2,14 +2,14 @@
 
 Mac mini 的自動部署：mini 每分鐘檢查各專案預設分支有沒有新 commit，CI 通過、而且不在該專案的禁止時段，才在 mini 上執行該專案自己的部署腳本。用來取代 mini 上的 GitHub self-hosted runner，讓各專案可以轉成 public repo。
 
-- 只用 port 41200-41209（目前沒有服務要開 port）。
+- 只用 port 41200-41209；監控網頁只綁 `127.0.0.1:41200`，經 Tailscale 查看，不對外開放。
 - 選最簡單、完整滿足當下需求的實作；不做投機性抽象。
 - 每個交付點保持可跑；不要為未完成的複雜度犧牲能動的版本。
 
 ## 技術約束
 
 - Python，跑在 mac mini 主機上（launchd 排程），不進 docker，不用資料庫。
-- **只拉不推**：不 push、不改 GitHub 上的任何設定。不開對外連接埠、不收 webhook。
+- **只拉不推**：不 push、不改 GitHub 上的任何設定。監控網頁只綁 localhost，經 Tailscale 查看；不開對外連接埠、不收 webhook。
 - **只部署預設分支上 CI 通過的 commit**。CI 沒過、還沒跑完或查不到，都當作不部署。
 - **不寫專案專屬的部署步驟**：實際部署一律呼叫該專案的 `deploy/update.sh`，裝套件、建置、重啟都在那支腳本裡。
 - repo 會公開：密碼、權杖一律不進 repo。
