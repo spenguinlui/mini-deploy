@@ -202,13 +202,14 @@ def test_lights_ignore_blocked_text(tmp_path):
     assert light(html, "app") == ("green", "最新")
 
 
-@pytest.mark.parametrize("kind", ["ci_pending", "ci_failed"])
-def test_waiting_for_ci_shows_checks_link_and_minutes(tmp_path, kind):
+@pytest.mark.parametrize("kind,shows_minutes", [("ci_pending", True), ("ci_failed", False)])
+def test_waiting_for_ci_shows_checks_link_and_minutes_only_while_pending(tmp_path, kind, shows_minutes):
     html, _ = serve_home(tmp_path, {"app": deployed(**blocked(kind))})
     section = card(html, "app")
     assert f'href="https://github.com/me/app/commit/{"b" * 40}/checks"' in section
     assert "CI 進度" in section
-    assert "已等 7 分鐘" in section
+    assert ("已等 7 分鐘" in section) is shows_minutes
+    assert ("已等" in section) is shows_minutes
 
 
 def test_other_waits_have_no_checks_link(tmp_path):
@@ -219,7 +220,10 @@ def test_other_waits_have_no_checks_link(tmp_path):
 
 @pytest.mark.parametrize("state,deployments,refreshes", [
     ({"app": deployed(**blocked("ci_pending"))}, [], True),
-    ({"app": deployed(**blocked("ci_failed"))}, [], True),
+    ({"app": deployed(**blocked("ci_failed"))}, [], False),
+    ({"app": deployed(**blocked("blackout"))}, [], False),
+    ({"app": deployed(**blocked("attention"))}, [], False),
+    ({"app": deployed()}, [("app", "c" * 40, "x", "失敗")], False),
     ({"app": deployed()}, [("app", "c" * 40, "x", None)], True),
     ({"app": deployed(), "other": deployed()}, [], False),
 ])

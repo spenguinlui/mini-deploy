@@ -91,9 +91,12 @@ def _project_color(project_state: dict, latest: dict | None) -> str:
 def _waiting_for_ci(project: Project, project_state: dict, now: datetime) -> str:
     if project_state.get("blocked_kind") not in CI_KINDS:
         return ""
-    minutes = int((now - datetime.fromisoformat(project_state["blocked_since"])).total_seconds() // 60)
     url = f'https://github.com/{project.repo}/commit/{project_state["blocked_sha"]}/checks'
-    return f'<div><a href="{html.escape(url, quote=True)}">CI 進度</a> · 已等 {minutes} 分鐘</div>'
+    link = f'<a href="{html.escape(url, quote=True)}">CI 進度</a>'
+    if project_state["blocked_kind"] != "ci_pending":
+        return f"<div>{link}</div>"
+    minutes = int((now - datetime.fromisoformat(project_state["blocked_since"])).total_seconds() // 60)
+    return f"<div>{link} · 已等 {minutes} 分鐘</div>"
 
 
 def _home(projects: list[Project], state: dict, records: list[dict], now: datetime) -> bytes:
@@ -103,7 +106,7 @@ def _home(projects: list[Project], state: dict, records: list[dict], now: dateti
         project_state = state.get(project.name, {})
         latest = next((r for r in records if r["project"] == project.name), None)
         color = _project_color(project_state, latest)
-        refresh = refresh or color == "yellow" or project_state.get("blocked_kind") in CI_KINDS
+        refresh = refresh or color == "yellow" or project_state.get("blocked_kind") == "ci_pending"
         current = "部署中" if color == "yellow" else project_state.get("blocked", "最新")
         recent = f'{latest["result"]} · {_time(latest["started_at"])}' if latest else "尚無部署紀錄"
         version = _commit_label(project_state.get("deployed"), project_state.get("deployed_title"))
